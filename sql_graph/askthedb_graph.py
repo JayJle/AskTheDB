@@ -17,7 +17,8 @@ from langgraph.prebuilt import ToolNode
 from sql_graph.my_llm import llm
 from sql_graph.my_state import SQLState
 from sql_graph.tools_node import generate_query_system_prompt, query_check_system, call_get_schema, get_schema_node, \
-    generation_error, has_tool_calls, latest_schema, validate_question, question_is_valid
+    generation_error, has_tool_calls, latest_schema, validate_question, question_is_valid, resolve_row_limit, \
+    verify_result
 
 mcp_server_config = {
     "url": "http://localhost:8000/sse",
@@ -67,12 +68,14 @@ async def make_graph():
         list_all_tables_node = ToolNode([list_all_tables_mcp_tool], name="list_all_tables_tool")
         # endregion
 
-        # Nodes 3, 4 and 5 (call_get_schema, get_schema_node, validate_question) are defined in tools_node.py
+        # Nodes 3, 4, 5 (call_get_schema, get_schema_node, validate_question) and 9 (verify_result)
+        # are defined in tools_node.py
 
         # region Node 6: generate a SQL tool call or the final answer (LLM)
         def generate_query(state: SQLState):
             """Node 6: have the LLM write a SQL tool call, or the final answer once it has the results."""
-            system_prompt = generate_query_system_prompt
+            # Row limit for this question: the number the user asked for, all rows, or the default
+            system_prompt = generate_query_system_prompt.format(top_k=resolve_row_limit(state))
             if state.get("assumption"):
                 # Interpretation chosen by validate_question for an ambiguous term
                 system_prompt += (f"\nInterpret the question as follows, and state this interpretation "
@@ -133,6 +136,7 @@ async def make_graph():
         workflow.add_node(generate_query)
         workflow.add_node(check_query)
         workflow.add_node(run_query_node)
+        workflow.add_node(verify_result)
 
         workflow.add_edge(START, "call_list_all_tables")
         workflow.add_edge("call_list_all_tables", "list_all_tables_tool")
@@ -144,7 +148,9 @@ async def make_graph():
         workflow.add_conditional_edges("validate_question", question_is_valid, {True: "generate_query", False: END})
         workflow.add_conditional_edges('generate_query', should_continue)
         workflow.add_conditional_edges("check_query", has_tool_calls, {True: "run_query", False: END})
-        workflow.add_edge("run_query", "generate_query")
+        # Every result is checked for anomalies; feedback (if any) goes back to generate_query with it
+        workflow.add_edge("run_query", "verify_result")
+        workflow.add_edge("verify_result", "generate_query")
 
         graph = workflow.compile()
         # endregion

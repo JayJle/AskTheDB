@@ -9,6 +9,21 @@ Double-check the SQLite query for common mistakes, including:
 - Casting to the correct data type
 - Using the proper columns for joins
 
+Also check for silent errors: mistakes that run without any error but return a wrong result.
+- Counting or averaging across joined tables: a one-to-many JOIN repeats rows. To count entities,
+  use COUNT(DISTINCT <key column>), and when computing an average per entity, divide by the number
+  of distinct entities, not by the number of joined rows.
+- Matching text values that come from the user's question: the stored value may differ in letter
+  case or punctuation. Compare case-insensitively (for example LOWER(column) = LOWER('value')). If the
+  value contains punctuation such as an apostrophe or a quote, which may be stored as a different
+  character (for example a straight ' versus a curly ’), use LIKE and replace each such punctuation
+  character with the single-character wildcard _ so that the rest of the value still matches exactly.
+- Filtering on the right column: a named entity (a person, artist, album, playlist, genre, etc.) must be
+  matched in the table that stores that kind of entity, using its name or title column, not in a
+  free-text column that may only mention it.
+- Row limits: keep the query's LIMIT exactly as it is. Do not add a LIMIT to a query that has none,
+  and do not remove or change an existing one.
+
 Also check the query against the schema below and make sure every table and column it uses exists.
 
 If there are any of the above mistakes, rewrite the query. If there are no mistakes,

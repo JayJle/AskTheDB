@@ -1,7 +1,9 @@
 import sys
 from pathlib import Path
 from typing import List, Dict
+
 import gradio as gr
+from langchain_core.messages import AIMessage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # Project root, so this file can be run directly
 
@@ -19,14 +21,10 @@ async def execute_graph(chat_bot: List[Dict]) -> List[Dict]:
                                          stream_mode="values"):
             messages = event.get('messages')
             if messages:
-                if isinstance(messages, list):
-                    message = messages[-1]  # If messages is a list, take the last one
-                if message.__class__.__name__ == 'AIMessage':
-                    if message.content:
-                        print(result)
-                        result = message.content  # Message to show in the web UI
-                msg_repr = message.pretty_repr(html=True)
-                print(msg_repr)  # Print the message to the console for debugging
+                message = messages[-1]
+                if isinstance(message, AIMessage) and message.content:
+                    result = message.content  # Message to show in the web UI
+                print(message.pretty_repr())  # Print each step to the console for debugging
 
     chat_bot.append({'role': 'assistant', 'content': result})
     return chat_bot
@@ -39,11 +37,7 @@ def do_graph(user_input, chat_bot):
     return '', chat_bot
 
 
-css = '''
-#bgc {background-color: #7FFFD4}
-.feedback textarea {font-size: 24px !important}
-'''
-with gr.Blocks(title='AskTheDB', css=css) as instance:
+with gr.Blocks(title='AskTheDB') as instance:
     gr.Label('AskTheDB · Ask your database questions.', container=False)
 
     chatbot = gr.Chatbot(type='messages', height=450, label='AI assistant')  # Chat history

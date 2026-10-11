@@ -4,6 +4,7 @@ Contains the schema nodes (call_get_schema, get_schema_node), the question valid
 and shared helpers for error handling and routing. The system prompts are loaded from
 sql_graph/prompts/.
 """
+import sqlite3
 from pathlib import Path
 from typing import Literal
 
@@ -27,6 +28,26 @@ tools = toolkit.get_tools()
 
 # LangChain tool that returns the schema (DDL and sample rows) of the given tables
 get_schema_tool = next(tool for tool in tools if tool.name == 'sql_db_schema')
+
+# Row limit injected into the SQL-generation prompt for each question
+DEFAULT_ROW_LIMIT = 5     # the question does not say how many rows it wants
+MAX_ROW_LIMIT = 1000      # the question asks for all rows: a safety cap instead of no limit
+
+# Result verification: at most this many rounds of feedback per question, so it can never loop
+MAX_VERIFY_ROUNDS = 1
+# Name given to feedback messages from verify_result, so they are never taken for the user's question
+RESULT_FEEDBACK = 'result_check'
+
+
+def _table_row_counts() -> str:
+    """Row count of every table, read once at startup (gives the result check a sense of scale)."""
+    with sqlite3.connect(f'file:{DB_PATH.as_posix()}?mode=ro', uri=True) as conn:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+        return '\n'.join(f'- {t}: {conn.execute(f"SELECT COUNT(*) FROM [{t}]").fetchone()[0]}' for t in tables)
+
+
+TABLE_ROW_COUNTS = _table_row_counts()
 # endregion
 
 
@@ -64,9 +85,9 @@ def latest_schema(state: SQLState) -> str:
 
 
 def latest_question(state: SQLState) -> str:
-    """Return the user's most recent question."""
+    """Return the user's most recent question (skipping feedback messages from verify_result)."""
     for message in reversed(state["messages"]):
-        if isinstance(message, HumanMessage):
+        if isinstance(message, HumanMessage) and message.name != RESULT_FEEDBACK:
             return message.content
     return ''
 
@@ -74,6 +95,16 @@ def latest_question(state: SQLState) -> str:
 def question_is_valid(state: SQLState) -> bool:
     """Route after validate_question: continue only if the question can be answered."""
     return state.get("question_status") == 'ok'
+
+
+def resolve_row_limit(state: SQLState) -> int:
+    """Turn the row_limit found by validate_question into the limit for the SQL-generation prompt."""
+    requested = state.get("row_limit", 0)
+    if requested > 0:
+        return min(requested, MAX_ROW_LIMIT)
+    if requested < 0:
+        return MAX_ROW_LIMIT
+    return DEFAULT_ROW_LIMIT
 # endregion
 
 
@@ -105,6 +136,11 @@ class QuestionCheck(BaseModel):
         default='', description="For clarify/reject: the message to the user, in the language of the question")
     assumption: str = Field(
         default='', description="For ok: the interpretation used when a term was ambiguous, otherwise empty")
+    row_limit: int = Field(
+        default=0, description="How many result rows the question asks for: N if it asks for a specific number "
+                               "(e.g. 'top 3' -> 3); -1 if it asks for all of them (e.g. 'all', 'every', 'each', "
+                               "'list every ...', or a breakdown per group, per year or per month); "
+                               "0 if it does not say")
 
 
 def validate_question(state: SQLState):
@@ -125,12 +161,64 @@ def validate_question(state: SQLState):
         check = QuestionCheck(**response.tool_calls[0]["args"])
     except Exception as e:
         log.warning(f'Question validation failed, continuing without it: {e}')
-        return {"question_status": 'ok', "assumption": ''}
+        return {"question_status": 'ok', "assumption": '', "row_limit": 0}
 
     if check.status != 'ok':
         return {"question_status": check.status, "messages": [AIMessage(content=check.message)]}
     # generate_query adds the assumption to its system prompt and mentions it in the answer
-    return {"question_status": 'ok', "assumption": check.assumption}
+    return {"question_status": 'ok', "assumption": check.assumption, "row_limit": check.row_limit}
+# endregion
+
+
+# region Node 9: verify the result (is it a plausible answer to the question?)
+class ResultCheck(BaseModel):
+    """Decide whether a query result is a plausible answer to the user's question."""
+    plausible: bool = Field(description="True if the result is a plausible answer to the question")
+    issue: str = Field(default='', description="If not plausible: the problem and what to verify, in one or two sentences")
+
+
+def verify_result(state: SQLState):
+    """Node 9: check the latest query result for anomalies before the LLM answers from it.
+
+    Anomalies (an empty or zero result where data should exist, a count larger than the table,
+    a query that answers a different question) produce one feedback message, so generate_query
+    re-checks and fixes the query. Errors are skipped: they already go back to the LLM. If the
+    check itself fails, the result is accepted, so verification never blocks an answer.
+    """
+    rounds = state.get("verify_rounds", 0)
+    if rounds >= MAX_VERIFY_ROUNDS:
+        return {}
+
+    # The queries just executed, and their results
+    messages = state["messages"]
+    call_message = next((m for m in reversed(messages) if isinstance(m, AIMessage) and m.tool_calls), None)
+    if call_message is None:
+        return {}
+    results = {m.tool_call_id: str(m.content) for m in messages if isinstance(m, ToolMessage)}
+    executions = [(c["args"].get("query", ''), results.get(c["id"], '')) for c in call_message.tool_calls]
+    executions = [(sql, result) for sql, result in executions if result and not result.startswith('Error')]
+    if not executions:
+        return {}
+
+    prompt = verify_result_system.format(
+        table_counts=TABLE_ROW_COUNTS,
+        question=latest_question(state),
+        executions='\n\n'.join(f'SQL: {sql}\nResult: {result[:2000]}' for sql, result in executions),
+    )
+    llm_with_check = llm.bind_tools([ResultCheck], tool_choice=ResultCheck.__name__)
+    try:
+        response = llm_with_check.invoke([{"role": "user", "content": prompt}])
+        check = ResultCheck(**response.tool_calls[0]["args"])
+    except Exception as e:
+        log.warning(f'Result verification failed, accepting the result: {e}')
+        return {}
+
+    if check.plausible:
+        return {}
+    feedback = (f'Check of the query result: {check.issue}\n'
+                'Verify this with another query and fix the query if needed. '
+                'If the result turns out to be correct, answer with it.')
+    return {"messages": [HumanMessage(content=feedback, name=RESULT_FEEDBACK)], "verify_rounds": rounds + 1}
 # endregion
 
 
@@ -139,10 +227,13 @@ def validate_question(state: SQLState):
 validate_question_system = load_prompt('validate_question')
 
 # generate_query: write a SQL query for the question, or answer from the results.
-# The dialect and row limit are fixed, so they are filled in once here
-generate_query_system_prompt = load_prompt('generate_query').format(dialect=db.dialect, top_k=5)
+# The dialect is filled in once here; {top_k} is filled in per question with resolve_row_limit()
+generate_query_system_prompt = load_prompt('generate_query').format(dialect=db.dialect, top_k='{top_k}')
 
 # check_query: review the SQL for common mistakes and against the schema.
 # {schema} is filled in at run time with latest_schema()
 query_check_system = load_prompt('check_query')
+
+# verify_result: judge whether a query result is plausible. Filled in at run time
+verify_result_system = load_prompt('verify_result')
 # endregion

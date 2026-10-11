@@ -15,8 +15,10 @@ AI:   1. Iron Maiden (21 albums)  2. Led Zeppelin (14 albums)  3. Deep Purple (1
 
 - **Natural-language questions**: ask in English or Chinese; the answer comes back in the same language.
 - **Question validation**: before writing any SQL, the workflow checks that the question can be answered from the existing tables and columns. It asks for clarification when a question is ambiguous and explains when the data does not exist.
-- **Checked SQL**: every query is reviewed against the schema by a separate step before it runs; only checked SQL is ever executed.
+- **Checked SQL**: every query is reviewed against the schema by a separate step before it runs, including common "silent" mistakes such as counting duplicated rows after a JOIN; only checked SQL is ever executed.
+- **Result verification**: after a query runs, a separate step checks that the result is a plausible answer (for example not an empty result where data should exist, or a count larger than the table). If not, the model re-checks and fixes the query before answering.
 - **Self-correction**: when a query fails, the error goes back to the model, which fixes the SQL and retries.
+- **Row limits that follow the question**: "top 3" returns 3 rows, "list every…" returns all rows, and other questions default to 5.
 - **Read-only by design**: the database is opened read-only and the MCP server accepts only a single `SELECT`/`WITH` statement.
 - **Reusable MCP server**: the database tools run as a standalone MCP server that any MCP client supporting SSE can use.
 - **Two interfaces**: a Gradio web chat and a command-line chat.
@@ -32,13 +34,15 @@ AI:   1. Iron Maiden (21 albums)  2. Led Zeppelin (14 albums)  3. Deep Purple (1
 5. Generate a query from the question and the DDL
 6. Check the query for errors
 7. Run the query and return the results
-8. On error, correct the query until it succeeds
-9. Write the answer from the results
+8. Verify that the result is a plausible answer
+9. On an error or an implausible result, correct the query and run it again
+10. Write the answer from the results
 
 ### Key design decisions
 
 - **Generating a tool call and executing it are separate nodes.** The LLM (or fixed code) only decides *what* to run; a `ToolNode` runs it. This isolates errors: if generation fails, the workflow stops and nothing is executed; if execution fails, the error goes back to the LLM. It also leaves a natural checkpoint for human review between the two.
 - **Checked SQL replaces the original.** The workflow state stores messages with LangGraph's `add_messages` reducer: new messages are appended, and a message with the same id replaces the old one. The SQL check reuses the original message id, so the unchecked query is overwritten and can never run.
+- **Checks before and after execution.** `check_query` reviews the SQL text before it runs; `verify_result` reviews the actual result after it runs. Some mistakes only show up in the result: a query matching a name with the wrong apostrophe is valid SQL, but returns 0 rows. The result check sends feedback at most once per question, so it can never loop.
 - **Code instead of the LLM where possible.** Listing the tables is a fixed step, so plain code builds that tool call: faster, deterministic and free.
 
 ## Tech stack
@@ -64,11 +68,12 @@ AskTheDB/
 │   └── start_server.py     # Starts the MCP server (SSE, port 8000)
 ├── sql_graph/
 │   ├── askthedb_graph.py   # Builds the workflow graph (nodes that need the MCP tools)
-│   ├── tools_node.py       # Schema nodes, question validation and helpers
+│   ├── tools_node.py       # Schema nodes, question validation, result verification and helpers
 │   ├── prompts/            # System prompts as plain-text files, loaded with load_prompt()
 │   │   ├── validate_question.txt   # Decide ok / clarify / reject
 │   │   ├── generate_query.txt      # Write SQL, or answer from the results
-│   │   └── check_query.txt         # Review SQL for common mistakes and against the schema
+│   │   ├── check_query.txt         # Review SQL for common and silent mistakes before it runs
+│   │   └── verify_result.txt       # Judge whether a query result is plausible after it runs
 │   ├── my_state.py         # Workflow state definition
 │   ├── my_llm.py           # Qwen clients (LangChain chat model and OpenAI client)
 │   ├── env_utils.py        # Loads settings from .env, then .env.local
@@ -77,6 +82,9 @@ AskTheDB/
 │   └── log_utils.py        # Logging configuration
 ├── gradio_view/
 │   └── chat_gradio.py      # Gradio web chat
+├── eval/
+│   ├── test_set.py         # 200 evaluation questions with gold SQL
+│   └── run_eval.py         # Runs the questions through the workflow and scores them
 ├── chinook.db              # Sample database
 ├── askthedb.png            # Workflow diagram
 ├── requirements.txt
@@ -167,22 +175,35 @@ The server exposes three tools to any MCP client that supports the SSE transport
 
 ## Evaluation
 
-Tested on 20 hand-written questions (7 easy, 8 medium, 5 hard; half English, half Chinese) with known correct answers:
+The `eval/` folder holds 200 hand-written questions with gold SQL, half English and half Chinese, covering 55 SQL and scenario dimensions (joins, subqueries, window functions, set operations, dates, typos, ambiguous wording, write requests, prompt injection and more). Every answerable question was checked to have a unique correct answer.
 
-| Metric | Result |
-|---|---|
-| Final-answer accuracy | 19/20 |
-| SQL execution accuracy | 19/20 |
-| Average time per question | about 7 s |
+| Category | Questions | Correct |
+|---|---|---|
+| Easy (single table) | 40 | 40 |
+| Medium (joins, grouping) | 50 | 48 |
+| Hard (multi-table joins, subqueries, window functions, set operations) | 40 | 40 |
+| Edge cases (typos, zero results, units, relative dates, …) | 30 | 27 |
+| Ambiguous (must clarify or state an interpretation) | 10 | 10 |
+| Out of scope (must refuse and run no SQL) | 30 | 30 |
+| **Total** | **200** | **195 (97.5%)** |
 
-The question validation step stopped or clarified 10 out of 10 unanswerable or ambiguous questions, without blocking any of the 20 normal questions.
+- The average time per question was about 9 s.
+- None of the 30 out-of-scope questions (missing data, write requests, prompt injection, password requests) ran any SQL.
+- Result verification sent feedback on 17 questions; 16 of them ended with a correct answer, including results that were empty only because a name was written with a different apostrophe.
+- The 5 misses: an artist name with a typo where too few tables were selected, a count after a JOIN that was not de-duplicated, a question read at the wrong level (artist instead of album), "the latest year" read as the wrong year, and a date comparison that dropped the boundary day.
 
-The one miss involved a playlist named `90’s Music`, written with a typographic apostrophe: the model matched the name with a plain `'`, the query returned 0, and nothing flagged it. These are small, single-run tests on a well-known sample database, so expect lower accuracy on your own data.
+These are single-run results on a well-known sample database, so expect lower accuracy on your own data. To run the evaluation yourself (with the MCP server running):
+
+```bash
+python eval/run_eval.py              # all 200 questions
+python eval/run_eval.py H12 X06      # selected questions
+```
 
 ## Limitations and roadmap
 
 - **Multi-turn conversations**: each question starts a new conversation, so the reply to a clarifying question loses the original context. Planned: keep conversation state with a LangGraph checkpointer.
-- **Value matching**: the model sees the schema but not the actual values in each column, so text filters can miss (as in the evaluation miss above). Planned: fuzzy matching, and a tool to look up real column values.
+- **Table selection**: the tables are picked once, before the SQL is written. If that choice misses a table, the SQL step cannot ask for more. Planned: let the SQL step request additional schema.
+- **Dates**: date columns store a time part, so comparing them with a plain date string can drop the boundary day.
 - **Human review**: the generation/execution split leaves room for a human to approve or edit SQL before it runs; not implemented yet.
 - **Retry limit**: the self-correction loop is bounded only by LangGraph's default recursion limit (25 steps).
 - **Concurrency**: `search_tool` runs synchronously on the MCP server and blocks other requests while it waits for the web search.
