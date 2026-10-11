@@ -1,0 +1,188 @@
+# AskTheDB
+
+[English](README.md) | **简体中文**
+
+用自然语言向数据库提问，得到基于真实 SQL 查询的回答。
+
+AskTheDB 是一个基于 **LangGraph** 和 **MCP（Model Context Protocol）** 的 Text-to-SQL 助手。LangGraph 工作流把用户的问题转换成 SQL，检查后通过只读的 MCP 服务器执行，再根据查询结果生成回答。项目自带 [Chinook](https://github.com/lerocha/chinook-database) 示例数据库（一家数字音乐商店），支持中英文提问。
+
+```
+用户：专辑数量最多的歌手是谁？
+AI：  专辑数量最多的歌手是 Iron Maiden，共有 21 张专辑。
+```
+
+## 功能特点
+
+- **自然语言提问**：支持中英文，用什么语言提问就用什么语言回答。
+- **问题校验**：生成 SQL 之前，先判断问题能否用现有的表和字段回答。问题有歧义时会请用户澄清，数据不存在时会说明原因。
+- **SQL 执行前检查**：每条 SQL 都会由单独的步骤对照表结构检查，只有检查过的 SQL 才会被执行。
+- **自动纠错**：查询出错时，错误信息会返回给模型，由模型修正 SQL 后重试。
+- **只读设计**：数据库以只读方式打开，MCP 服务器只接受单条 `SELECT`/`WITH` 语句。
+- **可复用的 MCP 服务**：数据库工具作为独立的 MCP 服务器运行，任何支持 SSE 的 MCP 客户端都可以直接使用。
+- **两种使用方式**：Gradio 网页聊天和命令行聊天。
+
+## 工作原理
+
+![AskTheDB 工作流](askthedb.png)
+
+1. 获取可用的表
+2. 确定相关的表
+3. 获取相关表的 DDL
+4. 校验问题是否可以回答（`ok` / `clarify` / `reject`）
+5. 根据问题和 DDL 生成查询
+6. 检查查询中的错误
+7. 执行查询并返回结果
+8. 出错就纠正，直到查询成功
+9. 根据结果生成回答
+
+### 关键设计
+
+- **工具调用的"生成"与"执行"分离**：LLM（或固定代码）只负责决定"执行什么"，由 `ToolNode` 负责执行。这样可以隔离错误：生成失败时流程直接结束，不执行任何操作；执行失败时，错误返回给 LLM。两者之间也天然留出了人工审核的位置。
+- **检查后的 SQL 覆盖原指令**：工作流状态用 LangGraph 的 `add_messages` 合并消息：新消息追加到末尾，id 相同的消息覆盖旧消息。SQL 检查复用原消息的 id，所以未经检查的 SQL 会被覆盖，永远不会被执行。
+- **能用代码就不用 LLM**：获取表名是固定操作，直接用代码生成工具调用，更快、结果确定，也不消耗 token。
+
+## 技术栈
+
+| 领域 | 技术 |
+|---|---|
+| 语言 | Python 3.11 |
+| 工作流编排 | [LangGraph](https://github.com/langchain-ai/langgraph) 0.3 |
+| LLM 框架 | [LangChain](https://github.com/langchain-ai/langchain) 0.3（`langchain-openai`、`langchain-community`） |
+| 工具协议 | [MCP](https://modelcontextprotocol.io) Python SDK 1.6（FastMCP，SSE 传输）、`langchain-mcp-adapters` |
+| 大模型 | 通义千问 Qwen（默认 `qwen-plus`），通过阿里云百炼的 OpenAI 兼容接口调用 |
+| 数据库 | SQLite，Chinook 示例数据库 |
+| 网页界面 | [Gradio](https://www.gradio.app) 5 |
+| 日志 | [loguru](https://github.com/Delgan/loguru) |
+| 流程图 | Mermaid，通过 [mermaid.ink](https://mermaid.ink) 渲染 |
+
+## 项目结构
+
+```
+AskTheDB/
+├── mcp_server/
+│   ├── mcp_tools.py        # MCP 服务器和工具：list_all_tables_tool、db_query_tool、search_tool
+│   └── start_server.py     # 启动 MCP 服务器（SSE，端口 8000）
+├── sql_graph/
+│   ├── askthedb_graph.py   # 构建工作流图（需要 MCP 工具的节点）
+│   ├── tools_node.py       # 表结构节点、问题校验和辅助函数
+│   ├── prompts/            # 系统提示词（纯文本文件，通过 load_prompt() 加载）
+│   │   ├── validate_question.txt   # 判断 ok / clarify / reject
+│   │   ├── generate_query.txt      # 生成 SQL，或根据结果回答
+│   │   └── check_query.txt         # 检查 SQL 的常见错误，并对照表结构核对
+│   ├── my_state.py         # 工作流状态定义
+│   ├── my_llm.py           # Qwen 客户端（LangChain 聊天模型和 OpenAI 客户端）
+│   ├── env_utils.py        # 依次从 .env 和 .env.local 读取配置
+│   ├── execute_graph.py    # 命令行聊天（同时重新生成 askthedb.png）
+│   ├── draw_png.py         # 绘制工作流图
+│   └── log_utils.py        # 日志配置
+├── gradio_view/
+│   └── chat_gradio.py      # Gradio 网页聊天
+├── chinook.db              # 示例数据库
+├── askthedb.png            # 工作流图
+├── requirements.txt
+└── .env                    # 配置文件，包含占位值（API Key 填在这里或 .env.local 中）
+```
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.11
+- [阿里云百炼（DashScope）](https://bailian.console.aliyun.com) 的 API Key
+
+### 1. 安装
+
+```bash
+git clone <your-repo-url> AskTheDB
+cd AskTheDB
+
+python -m venv .venv
+# Windows（PowerShell）
+.\.venv\Scripts\Activate.ps1
+# macOS / Linux
+source .venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+### 2. 配置
+
+打开项目根目录下的 `.env`，把 `your-api-key-here` 换成你的 API Key：
+
+```ini
+QWEN_API_KEY=your-api-key-here
+```
+
+> **不要把 Key 提交到 Git：** `.env` 是仓库中的文件。如果你打算提交或分享自己的代码，请把真实的 Key 写在 `.env.local` 文件里（格式相同）。它已被 Git 忽略，其中的值会覆盖 `.env`。
+
+| 变量 | 是否必填 | 默认值 | 说明 |
+|---|---|---|---|
+| `QWEN_API_KEY` | 是 | – | 阿里云百炼（DashScope）API Key |
+| `QWEN_BASE_URL` | 否 | 中国站（北京）地址 | 必须与 Key 所属地域一致；国际站 Key 请使用 `dashscope-intl` 地址 |
+| `QWEN_MODEL` | 否 | `qwen-plus` | 工作流使用的模型 |
+| `LOG_LEVEL` | 否 | `DEBUG` | 最低日志级别 |
+
+### 3. 运行
+
+工作流通过 MCP 服务器访问数据库，所以**要先启动服务器**，并保持运行。
+
+**终端 1：MCP 服务器**
+
+```bash
+python mcp_server/start_server.py
+```
+
+服务地址为 `http://localhost:8000/sse`。日志里出现 `GET /` 的 `404` 是正常的，MCP 的接口地址是 `/sse`。
+
+**终端 2：选择一种使用方式**
+
+```bash
+# 网页聊天：打开 http://127.0.0.1:7860
+python gradio_view/chat_gradio.py
+
+# 或者：命令行聊天（输入 q、exit 或 quit 退出）
+python sql_graph/execute_graph.py
+```
+
+## 示例问题
+
+| 问题 | 体现的能力 |
+|---|---|
+| How many customers are from Brazil? | 简单统计 |
+| 专辑数量最多的歌手是谁？ | 关联、分组，中文回答 |
+| 销售额最高的3种音乐类型是哪些？ | 三表关联并计算销售额 |
+| What is the most popular album? | 有歧义的词语：按默认理解（销售额最高）回答，并说明理解方式 |
+| 最好的歌是哪首？ | 有歧义且没有默认理解：请用户澄清 |
+| 客户的平均年龄是多少？ | 数据库中没有该数据：说明可以查询哪些信息 |
+
+## 单独使用 MCP 服务器
+
+服务器向任何支持 SSE 传输的 MCP 客户端提供三个工具（`http://localhost:8000/sse`）：
+
+| 工具 | 说明 |
+|---|---|
+| `list_all_tables_tool` | 列出所有表名 |
+| `db_query_tool` | 执行一条只读的 `SELECT`（或 `WITH`）查询，返回结果行或简短的错误信息 |
+| `search_tool` | 通过 Qwen 联网搜索，用于查询数据库之外的信息 |
+
+## 评测
+
+用 20 道手写题目测试（简单 7 道、中等 8 道、困难 5 道；中英文各半），每题都有标准答案：
+
+| 指标 | 结果 |
+|---|---|
+| 最终回答准确率 | 19/20 |
+| SQL 执行准确率 | 19/20 |
+| 平均每题耗时 | 约 7 秒 |
+
+问题校验拦截或澄清了全部 10 道无法回答或有歧义的问题，并且没有误拦 20 道正常问题中的任何一道。
+
+唯一答错的题涉及名为 `90’s Music` 的歌单，名称里用的是排版撇号 `’`。模型写 SQL 时用了普通撇号 `'`，查询返回 0，整个流程没有发现异常。以上测试规模较小、只跑了一轮，而且用的是公开的经典数据集，在实际业务数据上准确率通常会更低。
+
+## 局限与后续计划
+
+- **多轮对话**：每次提问都是新的会话，用户回答澄清问题时，原来的问题已经丢失。计划用 LangGraph 的 checkpointer 保存会话状态。
+- **值匹配**：模型能看到表结构，但看不到每一列的真实取值，所以文本筛选条件可能匹配不上（如上面评测中的错题）。计划加入模糊匹配，以及查询列真实取值的工具。
+- **人工审核**："生成与执行分离"的设计为执行前的人工确认或修改 SQL 留出了位置，目前还没有实现。
+- **重试上限**：自动纠错循环只受 LangGraph 默认递归上限（25 步）限制。
+- **并发**：`search_tool` 在 MCP 服务器上同步执行，等待联网搜索时会阻塞其他请求。

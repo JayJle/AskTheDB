@@ -1,0 +1,25 @@
+# Direct dependencies of AskTheDB (Python 3.11). Versions are the ones the project is tested with.
+
+# Workflow and LLM
+langchain==0.3.23
+langchain-core==0.3.51
+langchain-community==0.3.21
+langchain-openai==0.3.12
+langchain-mcp-adapters==0.0.9
+langgraph==0.3.30
+langgraph-checkpoint==2.0.24
+langgraph-prebuilt==0.1.8
+openai==1.70.0
+pydantic==2.11.2
+
+# MCP server and database
+mcp==1.6.0
+SQLAlchemy==2.0.40
+
+# Web UI
+gradio==5.25.2
+
+# Utilities
+loguru==0.7.3
+python-dotenv==1.1.0
+requests==2.32.3
