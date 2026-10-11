@@ -1,3 +1,7 @@
+"""AskTheDB MCP server: read-only database tools and web search, served over SSE on port 8000.
+
+Tools: list_all_tables_tool, db_query_tool (a single SELECT/WITH statement only) and search_tool.
+"""
 import re
 from pathlib import Path
 
@@ -7,6 +11,7 @@ from mcp.server import FastMCP
 from sql_graph.env_utils import QWEN_MODEL
 from sql_graph.my_llm import qwen_client
 
+# region Setup: MCP server and read-only database connection
 DB_PATH = Path(__file__).resolve().parent.parent / 'chinook.db'
 
 mcp_server = FastMCP(
@@ -18,12 +23,13 @@ mcp_server = FastMCP(
     ),
     port=8000,
 )
+# mode=ro opens the SQLite file read-only, so writes fail even if a query gets past the checks
 db = SQLDatabase.from_uri(f'sqlite:///file:{DB_PATH.as_posix()}?mode=ro&uri=true')
+# endregion
 
+
+# region Helpers: SQL validation and error messages
 _SQL_COMMENT = re.compile(r'--[^\n]*|/\*.*?\*/', re.DOTALL)
-
-
-
 
 
 def check_select_only(query: str) -> str | None:
@@ -40,9 +46,6 @@ def check_select_only(query: str) -> str | None:
     return None
 
 
-
-
-
 def format_db_error(raw: str) -> str:
     """Turn a SQLAlchemy error string into a short, actionable message for the model."""
     # 'Error: (sqlite3.OperationalError) no such column: x\n[SQL: ...]\n(Background on this error at: ...)'
@@ -51,11 +54,10 @@ def format_db_error(raw: str) -> str:
         return ('Error: The query tried to modify data, but this database is read-only. '
                 'Only SELECT queries can be run.')
     return f'Error: {message}. Fix the query and try again.'
+# endregion
 
 
-
-
-
+# region Tool: search_tool (web search through Qwen)
 @mcp_server.tool()
 def search_tool(query: str) -> str:
     """Search the web for up-to-date information that is not stored in the database.
@@ -85,11 +87,10 @@ def search_tool(query: str) -> str:
     except Exception as e:
         print(e)
     return 'No search results found. Try rephrasing the query.'
+# endregion
 
 
-
-
-
+# region Tool: list_all_tables_tool
 @mcp_server.tool()
 def list_all_tables_tool() -> str:
     """List all tables in the database.
@@ -101,11 +102,10 @@ def list_all_tables_tool() -> str:
         A comma-separated list of table names, e.g. "albums, artists, customers".
     """
     return ", ".join(db.get_usable_table_names())
+# endregion
 
 
-
-
-
+# region Tool: db_query_tool (read-only SQL)
 @mcp_server.tool()
 def db_query_tool(query: str) -> str:
     """Execute a read-only SQL query and return the rows.
@@ -129,13 +129,14 @@ def db_query_tool(query: str) -> str:
         or a message starting with "Error:" that explains the problem. On error, fix the
         query as described and call this tool again.
     """
-    error = check_select_only(query) # Enforce read-only SQL queries
+    error = check_select_only(query)  # Enforce read-only SQL queries
     if error:
         return error
-    
+
     result = db.run_no_throw(query)  # Returns an "Error: ..." string instead of raising
     if not result:
         return "Query returned no rows."
     if isinstance(result, str) and result.startswith('Error:'):
         return format_db_error(result)
     return result
+# endregion
