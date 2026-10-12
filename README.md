@@ -31,7 +31,7 @@ AI:   1. Iron Maiden (21 albums)  2. Led Zeppelin (14 albums)  3. Deep Purple (1
 2. Pick the tables relevant to the question
 3. Get the DDL of those tables
 4. Validate that the question can be answered (`ok` / `clarify` / `reject`)
-5. Generate a query from the question and the DDL
+5. Generate a query from the question and the DDL (if it needs a table that step 2 did not pick, fetch that table's DDL first)
 6. Check the query for errors
 7. Run the query and return the results
 8. Verify that the result is a plausible answer
@@ -199,11 +199,48 @@ python eval/run_eval.py              # all 200 questions
 python eval/run_eval.py H12 X06      # selected questions
 ```
 
-## Limitations and roadmap
+## Version history
 
-- **Multi-turn conversations**: each question starts a new conversation, so the reply to a clarifying question loses the original context. Planned: keep conversation state with a LangGraph checkpointer.
-- **Table selection**: the tables are picked once, before the SQL is written. If that choice misses a table, the SQL step cannot ask for more. Planned: let the SQL step request additional schema.
-- **Dates**: date columns store a time part, so comparing them with a plain date string can drop the boundary day.
-- **Human review**: the generation/execution split leaves room for a human to approve or edit SQL before it runs; not implemented yet.
-- **Retry limit**: the self-correction loop is bounded only by LangGraph's default recursion limit (25 steps).
-- **Concurrency**: `search_tool` runs synchronously on the MCP server and blocks other requests while it waits for the web search.
+### v1 · Base workflow
+
+**What was built**
+
+- A LangGraph workflow that turns a question in English or Chinese into SQL, checks it, runs it and answers from the results.
+- Every tool call is split into a generate node and an execute node: a failed generation never runs anything, and a failed execution goes back to the LLM, which fixes the SQL and retries.
+- Question validation (`ok` / `clarify` / `reject`) before any SQL is written, and an SQL check before it runs that overwrites the unchecked call by reusing its message id.
+- A standalone read-only MCP server (`list_all_tables_tool`, `db_query_tool`, `search_tool`): the database is opened read-only and only a single `SELECT`/`WITH` statement is accepted.
+- A Gradio web chat and a command-line chat.
+
+**Result**
+
+- 93.5% (187/200) on the 200-question evaluation built in v2.
+
+### v2 · Result verification and evaluation
+
+**What was optimized**
+
+- Result verification (`verify_result`): after a query runs, an LLM checks the result against the question and the table sizes (an empty or zero result where data should exist, a count larger than the table, an answer to a different question) and sends one round of feedback.
+- Silent-error rules in the SQL check: de-duplicate counts after a JOIN, match text regardless of letter case and punctuation, and match each entity in its own table.
+- Row limits that follow the question: "top 3" returns 3 rows, "list every…" returns all rows, and other questions default to 5.
+- A 200-question evaluation set (6 categories, English and Chinese, 55 dimensions) with gold SQL and an automatic scorer; changes without a measurable gain were reverted.
+
+**Result**
+
+- Accuracy on the 200 questions rose from 93.5% to 97.5% (195/200, single run); hard questions 40/40.
+- Result verification triggered on 17 questions and 16 of them ended correct, including the apostrophe cases that had failed in every earlier run.
+- All 30 out-of-scope questions were refused without running any SQL.
+
+### v3 · Ablation study and on-demand schema
+
+**What was optimized**
+
+- An ablation study: each check node removed in turn and compared with a single-prompt baseline, 3 runs per variant and a paired McNemar test, measuring what each node adds in accuracy, tokens and time.
+- Fetching more schema while writing SQL: the SQL step can call `sql_db_schema`, and a new `get_more_schema` node fetches the missing tables and returns to it. The study showed that when table selection missed a table, the model tried this call and the SQL check stopped the workflow with an error.
+- A fallback in the SQL check: a tool call it cannot check (an unknown tool or a missing argument) is passed on and its error goes back to the LLM, instead of ending the workflow. Only checked SQL is ever executed, as before.
+- The workflow diagram is drawn by stage, with no crossing lines.
+
+**Result**
+
+- Re-measured with 3 runs and the same scoring: correct answers rose from 192.0 to 195.0 out of 200 on average; error stops fell from 8 to 0 and recursion-limit failures from 2 to 0 across the 3 runs; the spread between runs narrowed from 189–196 to 193–196. (v2's 97.5% was a single run near the top of that range.)
+- What each check adds (3-run averages): removing question validation costs 12.3 questions (p = 0.031, all on out-of-scope and ambiguous questions); removing result verification costs 2 (not significant); the SQL check shows no measurable gain while using about 23% of the input tokens.
+- The full workflow answers about 26 more questions correctly than a single-prompt baseline (169.3/200, p < 0.001), at 2.9× the LLM calls and 1.9× the input tokens.

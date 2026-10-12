@@ -17,8 +17,8 @@ from langgraph.prebuilt import ToolNode
 from sql_graph.my_llm import llm
 from sql_graph.my_state import SQLState
 from sql_graph.tools_node import generate_query_system_prompt, query_check_system, call_get_schema, get_schema_node, \
-    generation_error, has_tool_calls, latest_schema, validate_question, question_is_valid, resolve_row_limit, \
-    verify_result
+    generation_error, has_tool_calls, all_schemas, validate_question, question_is_valid, resolve_row_limit, \
+    verify_result, get_schema_tool, get_more_schema_node
 
 mcp_server_config = {
     "url": "http://localhost:8000/sse",
@@ -26,14 +26,16 @@ mcp_server_config = {
 }
 
 
-def should_continue(state: SQLState) -> Literal[END, "check_query"]:
-    """Route after generate_query: check the SQL if the LLM made a tool call, otherwise end with its answer."""
+def should_continue(state: SQLState) -> Literal[END, "get_more_schema", "check_query"]:
+    """Route after generate_query: fetch the schema of more tables if the LLM asked for it,
+    check the SQL for any other tool call, otherwise end with its answer."""
     messages = state["messages"]
     last_message = messages[-1]
     if not last_message.tool_calls:
         return END
-    else:
-        return "check_query"
+    if any(call["name"] == get_schema_tool.name for call in last_message.tool_calls):
+        return "get_more_schema"
+    return "check_query"
 
 
 @asynccontextmanager
@@ -84,8 +86,10 @@ async def make_graph():
                 "role": "system",
                 "content": system_prompt,
             }
-            # The tool call is not forced, so the model can reply with the answer when it is done
-            llm_with_tools = llm.bind_tools([db_query_tool])
+            # The tool call is not forced, so the model can reply with the answer when it is done.
+            # sql_db_schema lets it fetch tables that call_get_schema did not pick. One tool call per
+            # message, so each message either fetches schema or runs SQL (see should_continue)
+            llm_with_tools = llm.bind_tools([db_query_tool, get_schema_tool], parallel_tool_calls=False)
             try:
                 resp = llm_with_tools.invoke([system_message] + state['messages'])
             except Exception as e:
@@ -100,15 +104,18 @@ async def make_graph():
             last_message = state["messages"][-1]
             system_message = {
                 "role": "system",
-                "content": query_check_system.format(schema=latest_schema(state) or '(none)'),
+                "content": query_check_system.format(schema=all_schemas(state) or '(none)'),
             }
             llm_with_tools = llm.bind_tools([db_query_tool], tool_choice=db_query_tool.name)
 
             checked_calls = []
             for tool_call in last_message.tool_calls:  # Check every tool call separately
                 query = tool_call.get("args", {}).get("query")
-                if not query:
-                    return {"messages": [generation_error('checking the SQL', 'the generated tool call has no "query" argument', last_message.id)]}
+                if tool_call["name"] != db_query_tool.name or not query:
+                    # No SQL to check (an unknown tool or a missing argument): pass the call on unchanged.
+                    # It cannot run any SQL; run_query answers it with an error that goes back to the LLM
+                    checked_calls.append(tool_call)
+                    continue
                 try:
                     response = llm_with_tools.invoke([system_message, {"role": "user", "content": query}])
                 except Exception as e:
@@ -134,6 +141,7 @@ async def make_graph():
         workflow.add_node(get_schema_node)
         workflow.add_node(validate_question)
         workflow.add_node(generate_query)
+        workflow.add_node(get_more_schema_node)
         workflow.add_node(check_query)
         workflow.add_node(run_query_node)
         workflow.add_node(verify_result)
@@ -147,6 +155,8 @@ async def make_graph():
         # Unanswerable or ambiguous questions end here with a clarifying message, before any SQL is written
         workflow.add_conditional_edges("validate_question", question_is_valid, {True: "generate_query", False: END})
         workflow.add_conditional_edges('generate_query', should_continue)
+        # The schema of the extra tables goes straight back to generate_query
+        workflow.add_edge("get_more_schema", "generate_query")
         workflow.add_conditional_edges("check_query", has_tool_calls, {True: "run_query", False: END})
         # Every result is checked for anomalies; feedback (if any) goes back to generate_query with it
         workflow.add_edge("run_query", "verify_result")

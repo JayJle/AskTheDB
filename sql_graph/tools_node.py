@@ -1,6 +1,6 @@
 """Workflow pieces that do not depend on the MCP connection.
 
-Contains the schema nodes (call_get_schema, get_schema_node), the question validation node,
+Contains the schema nodes (call_get_schema, get_schema_node, get_more_schema_node), the question validation node,
 and shared helpers for error handling and routing. The system prompts are loaded from
 sql_graph/prompts/.
 """
@@ -84,6 +84,12 @@ def latest_schema(state: SQLState) -> str:
     return latest_tool_output(state, get_schema_tool.name)
 
 
+def all_schemas(state: SQLState) -> str:
+    """Return every table schema (DDL) fetched so far: the first pick plus any fetched later, or ''."""
+    return '\n\n'.join(str(m.content) for m in state["messages"]
+                       if isinstance(m, ToolMessage) and m.name == get_schema_tool.name)
+
+
 def latest_question(state: SQLState) -> str:
     """Return the user's most recent question (skipping feedback messages from verify_result)."""
     for message in reversed(state["messages"]):
@@ -124,6 +130,12 @@ def call_get_schema(state: SQLState):
 
 # region Node 4: execute sql_db_schema locally with LangGraph's prebuilt ToolNode
 get_schema_node = ToolNode([get_schema_tool], name="get_schema_tool")
+# endregion
+
+
+# region Node 6b: execute sql_db_schema again when generate_query asks for more tables
+# Same tool as node 4, as its own node so the result goes back to generate_query
+get_more_schema_node = ToolNode([get_schema_tool], name="get_more_schema")
 # endregion
 
 

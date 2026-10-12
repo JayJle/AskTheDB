@@ -15,29 +15,38 @@ NODE_META = {
     'list_all_tables_tool': ('① Get all table names', 'execute', 'tables', 'EXECUTE · MCP tool'),
     'call_get_schema': ('② Pick relevant tables', 'gen_llm', 'schema', 'GENERATE · LLM'),
     'get_schema_tool': ('③ Get table DDL', 'execute', 'schema', 'EXECUTE · local tool'),
-    'validate_question': ('④ Validate the question', 'check', None, 'CHECK · LLM'),
+    'validate_question': ('④ Validate the question', 'check', 'question', 'CHECK · LLM'),
     'generate_query': ('⑤ Write SQL or answer', 'gen_llm', 'sql', 'GENERATE · LLM'),
+    'get_more_schema': ('Get DDL of more tables', 'execute', 'sql', 'EXECUTE · local tool'),
     'check_query': ('⑥ Check the SQL', 'check', 'sql', 'CHECK · LLM, rewrites the call'),
     'run_query': ('⑦ Run the SQL', 'execute', 'sql', 'EXECUTE · MCP tool, read-only'),
-    'verify_result': ('⑧ Verify the result', 'check', None, 'CHECK · LLM'),
+    'verify_result': ('⑧ Verify the result', 'check', 'sql', 'CHECK · LLM'),
 }
 
-# The graph has one end node; the diagram splits it into one ending per outcome, placed near
-# the step that leads to it, so the exit lines do not cross: ending -> (title, style, group)
+# The graph has one end node; the diagram splits it into one ending per outcome, placed next to
+# the step that leads to it, so no exit line has to cross the diagram: ending -> (title, style, group)
 ENDINGS = {
-    'end_answer': ('Answer', 'terminal', None),
+    'end_answer': ('Answer', 'terminal', 'sql'),
     'end_clarify': ('Clarification or refusal', 'ending_clarify', None),
-    'end_error': ('Error message · nothing executed', 'ending_error', None),
+    'end_error_schema': ('Error message · nothing executed', 'ending_error', 'schema'),
+    'end_error_sql': ('Error message · nothing executed', 'ending_error', 'sql'),
 }
-# Which ending each conditional exit leads to (any other exit is a failed generation)
-ENDING_FOR_SOURCE = {'generate_query': 'end_answer', 'validate_question': 'end_clarify'}
-ERROR_ENDING = 'end_error'
+# Which ending each exit leads to (any other exit is a failed generation in the SQL loop)
+ENDING_FOR_SOURCE = {
+    'generate_query': 'end_answer',
+    'validate_question': 'end_clarify',
+    'call_get_schema': 'end_error_schema',
+    'check_query': 'end_error_sql',
+}
+DEFAULT_ENDING = 'end_error_sql'
+ERROR_ENDINGS = {'end_error_schema', 'end_error_sql'}
 
 # Routing functions for conditional edges: source -> (function name, question, {target: branch label})
 ROUTES = {
-    'generate_query': ('should_continue', 'Needs another query?', {
-        'check_query': 'Yes · tool call',
-        '__end__': 'No · ⑩ answer',
+    'generate_query': ('should_continue', 'Next step?', {
+        'check_query': 'SQL',
+        'get_more_schema': 'more tables',
+        '__end__': '⑩ answer',
     }),
 }
 
@@ -47,17 +56,48 @@ EDGE_LABELS = {
     ('call_get_schema', 'get_schema_tool'): 'tool call',
     ('check_query', 'run_query'): 'checked tool call',
     ('verify_result', 'generate_query'): '⑨ result, error or feedback',
+    ('get_more_schema', 'generate_query'): 'DDL',
+    ('validate_question', 'generate_query'): 'ok',
     ('validate_question', '__end__'): 'clarify / reject',
     ('call_get_schema', '__end__'): 'failed',
     ('check_query', '__end__'): 'failed',
 }
 
-# Each frame is one tool call: a GENERATE step writes the instruction, an EXECUTE step runs it
+# Each frame is one stage of the workflow
 GROUPS = {
-    'tables': 'Tool call · list the tables',
-    'schema': 'Tool call · fetch the schema',
-    'sql': 'Tool call · run SQL (checked before it runs)',
+    'tables': 'List the tables',
+    'schema': 'Fetch the schema of the relevant tables',
+    'question': 'Check the question',
+    'sql': 'Write, check, run and verify the SQL',
 }
+
+# Mermaid lays the diagram out in the order nodes and edges are written. This order keeps the
+# main path straight and the lines from crossing: in the SQL loop "more tables" goes left, the
+# answer straight down and the SQL right, and the lines back to ⑤ run along the left side.
+# '<source>_route' is the decision hexagon of that source's routing function.
+DRAW_ORDER = [
+    '__start__', 'call_list_all_tables', 'list_all_tables_tool', 'call_get_schema', 'get_schema_tool',
+    'end_error_schema', 'validate_question', 'generate_query', 'generate_query_route', 'check_query',
+    'run_query', 'verify_result', 'end_error_sql', 'get_more_schema', 'end_answer', 'end_clarify',
+]
+EDGE_ORDER = [
+    ('__start__', 'call_list_all_tables'),
+    ('call_list_all_tables', 'list_all_tables_tool'),
+    ('list_all_tables_tool', 'call_get_schema'),
+    ('call_get_schema', 'get_schema_tool'),
+    ('call_get_schema', '__end__'),
+    ('get_schema_tool', 'validate_question'),
+    ('validate_question', '__end__'),
+    ('validate_question', 'generate_query'),
+    ('generate_query', 'check_query'),
+    ('check_query', 'run_query'),
+    ('run_query', 'verify_result'),
+    ('verify_result', 'generate_query'),
+    ('check_query', '__end__'),
+    ('generate_query', 'get_more_schema'),
+    ('get_more_schema', 'generate_query'),
+    ('generate_query', '__end__'),
+]
 
 LEGEND = [
     ('#6366F1', 'GENERATE a tool call (LLM)'),
@@ -80,6 +120,7 @@ STYLES = '''
     classDef default fill:#F1F5F9,stroke:#94A3B8,color:#0F172A
     style tables fill:#F8FAFC,stroke:#94A3B8,stroke-dasharray:5 5,color:#334155
     style schema fill:#F8FAFC,stroke:#94A3B8,stroke-dasharray:5 5,color:#334155
+    style question fill:#F8FAFC,stroke:#94A3B8,stroke-dasharray:5 5,color:#334155
     style sql fill:#F8FAFC,stroke:#94A3B8,stroke-dasharray:5 5,color:#334155
     classDef legend fill:#FFFFFF,stroke:#E2E8F0,color:#334155,text-align:left
 '''
@@ -121,35 +162,35 @@ def to_mermaid(graph) -> str:
     ]
 
     def ending_for(source: str) -> str:
-        return ENDING_FOR_SOURCE.get(source, ERROR_ENDING)
+        return ENDING_FOR_SOURCE.get(source, DEFAULT_ENDING)
 
-    # Endings actually reached in this graph
-    used_endings = {ending_for(e.source) for e in g.edges if e.target == '__end__'}
+    def draw_rank(item_id: str) -> int:
+        return DRAW_ORDER.index(item_id) if item_id in DRAW_ORDER else len(DRAW_ORDER)
 
-    # Nodes (placed into subgraphs by group); __end__ is drawn as the separate endings
-    grouped = {}
+    # Everything to draw: the graph's nodes (__end__ is drawn as the separate endings),
+    # a decision hexagon per routing function, and the endings actually reached in this graph
+    items = {}  # id -> (group, Mermaid line)
     for node_id in g.nodes:
-        if node_id == '__end__':
-            continue
-        group = NODE_META.get(node_id, (None, None, None, None))[2]
-        if group:
-            grouped.setdefault(group, []).append(_node_line(node_id))
-        else:
-            lines.append(_node_line(node_id))
-    for ending_id in sorted(used_endings):
-        group = ENDINGS[ending_id][2]
-        if group:
-            grouped.setdefault(group, []).append(_ending_line(ending_id))
-        else:
-            lines.append(_ending_line(ending_id))
-    for group, node_lines in grouped.items():
-        lines.append(f'    subgraph {group}["{GROUPS[group]}"]')
-        lines.extend('    ' + line for line in node_lines)
-        if group == 'sql':
-            # Draw routing functions as decision hexagons inside the SQL tool call
-            for source, (func, question, _) in ROUTES.items():
-                lines.append(f'        {source}_route{{{{"<b>{question}</b><br/><small><i>{func}</i></small>"}}}}:::decision')
-        lines.append('    end')
+        if node_id != '__end__':
+            items[node_id] = (NODE_META.get(node_id, (None, None, None, None))[2], _node_line(node_id))
+    for source, (func, question, _) in ROUTES.items():
+        if source in g.nodes:
+            line = f'    {source}_route{{{{"<b>{question}</b><br/><small><i>{func}</i></small>"}}}}:::decision'
+            items[f'{source}_route'] = (NODE_META[source][2], line)
+    for ending_id in {ending_for(e.source) for e in g.edges if e.target == '__end__'}:
+        items[ending_id] = (ENDINGS[ending_id][2], _ending_line(ending_id))
+    ordered = sorted(items, key=draw_rank)
+
+    # The start node first, then one frame per stage, then the endings outside the frames
+    ungrouped = [i for i in ordered if items[i][0] is None]
+    lines.extend(items[i][1] for i in ungrouped if i == '__start__')
+    for group, title in GROUPS.items():
+        members = [i for i in ordered if items[i][0] == group]
+        if members:
+            lines.append(f'    subgraph {group}["{title}"]')
+            lines.extend('    ' + items[i][1] for i in members)
+            lines.append('    end')
+    lines.extend(items[i][1] for i in ungrouped if i != '__start__')
 
     # Edges
     routed = set()
@@ -163,7 +204,11 @@ def to_mermaid(graph) -> str:
             error_links.append(link_count)
         link_count += 1
 
-    for edge in g.edges:
+    def edge_rank(edge) -> int:
+        key = (edge.source, edge.target)
+        return EDGE_ORDER.index(key) if key in EDGE_ORDER else len(EDGE_ORDER)
+
+    for edge in sorted(g.edges, key=edge_rank):
         target = ending_for(edge.source) if edge.target == '__end__' else edge.target
         if edge.conditional and edge.source in ROUTES:
             if edge.source not in routed:
@@ -175,12 +220,12 @@ def to_mermaid(graph) -> str:
         else:
             label = EDGE_LABELS.get((edge.source, edge.target))
             # Solid lines for the main path, dotted only for exits that stop early
-            dotted = target in (ERROR_ENDING, 'end_clarify')
+            dotted = target in ERROR_ENDINGS or target == 'end_clarify'
             if label:
                 arrow = f'-. {label} .->' if dotted else f'-- {label} -->'
             else:
                 arrow = '-.->' if dotted else '-->'
-            add_link(f'    {edge.source} {arrow} {target}', is_error=(target == ERROR_ENDING))
+            add_link(f'    {edge.source} {arrow} {target}', is_error=(target in ERROR_ENDINGS))
 
     if error_links:
         lines.append(f'    linkStyle {",".join(map(str, error_links))} stroke:#DC2626,color:#DC2626')
