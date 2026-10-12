@@ -11,15 +11,15 @@ TITLE = 'AskTheDB workflow'
 # gen_llm=generates a tool call with the LLM, execute=runs a tool call, check=LLM judges something
 NODE_META = {
     '__start__': ('User question', 'terminal', None, None),
-    'call_list_all_tables': ('Request the table list', 'gen_code', 'tables', 'GENERATE · fixed code'),
-    'list_all_tables_tool': ('① Get all table names', 'execute', 'tables', 'EXECUTE · MCP tool'),
-    'call_get_schema': ('② Pick relevant tables', 'gen_llm', 'schema', 'GENERATE · LLM'),
-    'get_schema_tool': ('③ Get table DDL', 'execute', 'schema', 'EXECUTE · local tool'),
-    'validate_question': ('④ Validate the question', 'check', 'question', 'CHECK · LLM'),
-    'generate_query': ('⑤ Write SQL or answer', 'gen_llm', 'sql', 'GENERATE · LLM'),
-    'check_query': ('⑥ Check the SQL', 'check', 'sql', 'CHECK · LLM, rewrites the call'),
-    'run_query': ('⑦ Run the SQL', 'execute', 'sql', 'EXECUTE · MCP tool, read-only'),
-    'verify_result': ('⑧ Verify the result', 'check', 'sql', 'CHECK · LLM'),
+    'call_list_all_tables': ('Request the table list', 'gen_code', 'tables', 'by code (no LLM)'),
+    'list_all_tables_tool': ('① Get all table names', 'execute', 'tables', 'by MCP tool'),
+    'call_get_schema': ('② Pick the relevant tables', 'gen_llm', 'schema', 'by LLM'),
+    'get_schema_tool': ('③ Fetch their DDL', 'execute', 'schema', 'by local tool'),
+    'validate_question': ('④ Can the question be answered?', 'check', 'question', 'by LLM'),
+    'generate_query': ('⑤ Write SQL or the answer', 'gen_llm', 'sql', 'by LLM'),
+    'check_query': ('⑥ Check and fix the SQL', 'check', 'sql', 'by LLM'),
+    'run_query': ('⑦ Run the SQL', 'execute', 'sql', 'by MCP tool · read-only'),
+    'verify_result': ('⑧ Is the result plausible?', 'check', 'sql', 'by LLM'),
 }
 
 # Nodes drawn as part of another node instead of as a box of their own, to keep the diagram
@@ -33,9 +33,9 @@ MERGED_NODES = {
 # the step that leads to it, so no exit line has to cross the diagram: ending -> (title, style, group)
 ENDINGS = {
     'end_answer': ('Answer', 'terminal', 'sql'),
-    'end_clarify': ('Clarification or refusal', 'ending_clarify', None),
-    'end_error_schema': ('Error message · nothing executed', 'ending_error', 'schema'),
-    'end_error_sql': ('Error message · nothing executed', 'ending_error', 'sql'),
+    'end_clarify': ('Ask to clarify or explain why not', 'ending_clarify', None),
+    'end_error_schema': ('Stop with an error · nothing run', 'ending_error', 'schema'),
+    'end_error_sql': ('Stop with an error · nothing run', 'ending_error', 'sql'),
 }
 # Which ending each exit leads to (any other exit is a failed generation in the SQL loop)
 ENDING_FOR_SOURCE = {
@@ -57,14 +57,12 @@ ROUTES = {
 
 # Labels on edges: (source, target) -> label ('__end__' stands for the ending of that source)
 EDGE_LABELS = {
-    ('call_list_all_tables', 'list_all_tables_tool'): 'tool call',
-    ('call_get_schema', 'get_schema_tool'): 'tool call',
-    ('check_query', 'run_query'): 'checked tool call',
+    ('check_query', 'run_query'): 'checked SQL',
     ('verify_result', 'generate_query'): '⑨ result, error or feedback',
-    ('validate_question', 'generate_query'): 'ok',
-    ('validate_question', '__end__'): 'clarify / reject',
-    ('call_get_schema', '__end__'): 'failed',
-    ('check_query', '__end__'): 'failed',
+    ('validate_question', 'generate_query'): 'yes',
+    ('validate_question', '__end__'): 'unclear or out of scope',
+    ('call_get_schema', '__end__'): 'LLM call failed',
+    ('check_query', '__end__'): 'LLM call failed',
 }
 
 # Each frame is one stage of the workflow
@@ -101,12 +99,12 @@ EDGE_ORDER = [
 ]
 
 LEGEND = [
-    ('#6366F1', 'GENERATE a tool call (LLM)'),
-    ('#F59E0B', 'GENERATE a tool call (fixed code)'),
-    ('#10B981', 'EXECUTE the tool call'),
-    ('#0EA5E9', 'CHECK the question, SQL or result'),
-    ('#64748B', 'Decision'),
-    ('#DC2626', 'Failure exit (nothing is executed)'),
+    ('#6366F1', 'LLM decides what to run'),
+    ('#F59E0B', 'Code prepares the call (no LLM)'),
+    ('#10B981', 'A tool runs the call'),
+    ('#0EA5E9', 'LLM checks the question, SQL or result'),
+    ('#64748B', 'Routing rule in code'),
+    ('#DC2626', 'Stops with an error; nothing is run'),
 ]
 
 STYLES = '''
