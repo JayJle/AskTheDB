@@ -237,7 +237,7 @@ python eval/run_eval.py H12 X06      # selected questions
 - An ablation study: each check node removed in turn and compared with a single-prompt baseline, 3 runs per variant and a paired McNemar test, measuring what each node adds in accuracy, tokens and time.
 - Fetching more schema while writing SQL: the SQL step can call `sql_db_schema`, and a new `get_more_schema` node fetches the missing tables and returns to it. The study showed that when table selection missed a table, the model tried this call and the SQL check stopped the workflow with an error.
 - A fallback in the SQL check: a tool call it cannot check (an unknown tool or a missing argument) is passed on and its error goes back to the LLM, instead of ending the workflow. Only checked SQL is ever executed, as before.
-- The workflow diagram is drawn by stage, with no crossing lines.
+- The workflow diagram is drawn by stage: every step sits in a frame, fetching missing DDL is shown as part of step ⑤ (it happens before the SQL is written), and no lines cross.
 
 **Result**
 

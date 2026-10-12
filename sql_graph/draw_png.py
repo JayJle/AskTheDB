@@ -17,10 +17,16 @@ NODE_META = {
     'get_schema_tool': ('③ Get table DDL', 'execute', 'schema', 'EXECUTE · local tool'),
     'validate_question': ('④ Validate the question', 'check', 'question', 'CHECK · LLM'),
     'generate_query': ('⑤ Write SQL or answer', 'gen_llm', 'sql', 'GENERATE · LLM'),
-    'get_more_schema': ('Get DDL of more tables', 'execute', 'sql', 'EXECUTE · local tool'),
     'check_query': ('⑥ Check the SQL', 'check', 'sql', 'CHECK · LLM, rewrites the call'),
     'run_query': ('⑦ Run the SQL', 'execute', 'sql', 'EXECUTE · MCP tool, read-only'),
     'verify_result': ('⑧ Verify the result', 'check', 'sql', 'CHECK · LLM'),
+}
+
+# Nodes drawn as part of another node instead of as a box of their own, to keep the diagram
+# simple: node -> (host node, note shown in the host). Their edges are not drawn.
+# get_more_schema only fetches the DDL that ⑤ asks for before it writes the SQL
+MERGED_NODES = {
+    'get_more_schema': ('generate_query', 'fetches the DDL of missing tables first if needed'),
 }
 
 # The graph has one end node; the diagram splits it into one ending per outcome, placed next to
@@ -43,10 +49,9 @@ ERROR_ENDINGS = {'end_error_schema', 'end_error_sql'}
 
 # Routing functions for conditional edges: source -> (function name, question, {target: branch label})
 ROUTES = {
-    'generate_query': ('should_continue', 'Next step?', {
-        'check_query': 'SQL',
-        'get_more_schema': 'more tables',
-        '__end__': '⑩ answer',
+    'generate_query': ('should_continue', 'Needs another query?', {
+        'check_query': 'Yes · SQL',
+        '__end__': 'No · ⑩ answer',
     }),
 }
 
@@ -56,7 +61,6 @@ EDGE_LABELS = {
     ('call_get_schema', 'get_schema_tool'): 'tool call',
     ('check_query', 'run_query'): 'checked tool call',
     ('verify_result', 'generate_query'): '⑨ result, error or feedback',
-    ('get_more_schema', 'generate_query'): 'DDL',
     ('validate_question', 'generate_query'): 'ok',
     ('validate_question', '__end__'): 'clarify / reject',
     ('call_get_schema', '__end__'): 'failed',
@@ -72,13 +76,12 @@ GROUPS = {
 }
 
 # Mermaid lays the diagram out in the order nodes and edges are written. This order keeps the
-# main path straight and the lines from crossing: in the SQL loop "more tables" goes left, the
-# answer straight down and the SQL right, and the lines back to ⑤ run along the left side.
+# main path straight and the lines from crossing.
 # '<source>_route' is the decision hexagon of that source's routing function.
 DRAW_ORDER = [
     '__start__', 'call_list_all_tables', 'list_all_tables_tool', 'call_get_schema', 'get_schema_tool',
     'end_error_schema', 'validate_question', 'generate_query', 'generate_query_route', 'check_query',
-    'run_query', 'verify_result', 'end_error_sql', 'get_more_schema', 'end_answer', 'end_clarify',
+    'run_query', 'verify_result', 'end_error_sql', 'end_answer', 'end_clarify',
 ]
 EDGE_ORDER = [
     ('__start__', 'call_list_all_tables'),
@@ -94,8 +97,6 @@ EDGE_ORDER = [
     ('run_query', 'verify_result'),
     ('verify_result', 'generate_query'),
     ('check_query', '__end__'),
-    ('generate_query', 'get_more_schema'),
-    ('get_more_schema', 'generate_query'),
     ('generate_query', '__end__'),
 ]
 
@@ -130,8 +131,11 @@ def _node_line(node_id: str) -> str:
     title, kind, _, role = NODE_META.get(node_id, (node_id, 'default', None, None))
     if kind == 'terminal':
         return f'    {node_id}(["<b>{title}</b>"]):::terminal'
+    merged = [(name, note) for name, (host, note) in MERGED_NODES.items() if host == node_id]
     label = f'<small><b>{role}</b></small><br/>' if role else ''
-    label += f'<b>{title}</b><br/><small><i>node: {node_id}</i></small>'
+    label += f'<b>{title}</b><br/>'
+    label += ''.join(f'<small>{note}</small><br/>' for _, note in merged)
+    label += f'<small><i>node: {" + ".join([node_id] + [name for name, _ in merged])}</i></small>'
     return f'    {node_id}("{label}"):::{kind}'
 
 
@@ -171,7 +175,7 @@ def to_mermaid(graph) -> str:
     # a decision hexagon per routing function, and the endings actually reached in this graph
     items = {}  # id -> (group, Mermaid line)
     for node_id in g.nodes:
-        if node_id != '__end__':
+        if node_id != '__end__' and node_id not in MERGED_NODES:
             items[node_id] = (NODE_META.get(node_id, (None, None, None, None))[2], _node_line(node_id))
     for source, (func, question, _) in ROUTES.items():
         if source in g.nodes:
@@ -209,6 +213,8 @@ def to_mermaid(graph) -> str:
         return EDGE_ORDER.index(key) if key in EDGE_ORDER else len(EDGE_ORDER)
 
     for edge in sorted(g.edges, key=edge_rank):
+        if edge.source in MERGED_NODES or edge.target in MERGED_NODES:
+            continue  # Drawn as part of the host node
         target = ending_for(edge.source) if edge.target == '__end__' else edge.target
         if edge.conditional and edge.source in ROUTES:
             if edge.source not in routed:
