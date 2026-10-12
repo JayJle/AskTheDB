@@ -49,9 +49,9 @@ ERROR_ENDINGS = {'end_error_schema', 'end_error_sql'}
 
 # Routing functions for conditional edges: source -> (function name, question, {target: branch label})
 ROUTES = {
-    'generate_query': ('should_continue', 'Needs another query?', {
+    'generate_query': ('should_continue', 'Did ⑤ write a SQL query?', {
         'check_query': 'Yes · SQL',
-        '__end__': 'No · ⑩ answer',
+        '__end__': 'No · ⑩ it wrote the answer',
     }),
 }
 
