@@ -206,18 +206,19 @@ python eval/run_eval.py H12 X06      # selected questions
 
 - A LangGraph workflow that turns a question in English or Chinese into SQL, checks it, runs it and answers from the results.
 - Every tool call is split into a generate node and an execute node: a failed generation never runs anything, and a failed execution goes back to the LLM, which fixes the SQL and retries.
-- Question validation (`ok` / `clarify` / `reject`) before any SQL is written, and an SQL check before it runs that overwrites the unchecked call by reusing its message id.
+- An SQL check before each query runs, which overwrites the unchecked call by reusing its message id.
 - A standalone read-only MCP server (`list_all_tables_tool`, `db_query_tool`, `search_tool`): the database is opened read-only and only a single `SELECT`/`WITH` statement is accepted.
 - A Gradio web chat and a command-line chat.
 
 **Result**
 
-- 93.5% (187/200) on the 200-question evaluation built in v2.
+- Accuracy: 93.5% (187/200) on the 200-question evaluation built in v2.
 
-### v2 · Result verification and evaluation
+### v2 · Question validation, result verification and evaluation
 
 **What was optimized**
 
+- Question validation (`validate_question`: `ok` / `clarify` / `reject`) before any SQL is written: an ambiguous question gets a clarifying question, and a question the data cannot answer, or a request to change data, gets a refusal.
 - Result verification (`verify_result`): after a query runs, an LLM checks the result against the question and the table sizes (an empty or zero result where data should exist, a count larger than the table, an answer to a different question) and sends one round of feedback.
 - Silent-error rules in the SQL check: de-duplicate counts after a JOIN, match text regardless of letter case and punctuation, and match each entity in its own table.
 - Row limits that follow the question: "top 3" returns 3 rows, "list every…" returns all rows, and other questions default to 5.
@@ -227,7 +228,7 @@ python eval/run_eval.py H12 X06      # selected questions
 
 - Accuracy on the 200 questions rose from 93.5% to 97.5% (195/200, single run); hard questions 40/40.
 - Result verification triggered on 17 questions and 16 of them ended correct, including the apostrophe cases that had failed in every earlier run.
-- All 30 out-of-scope questions were refused without running any SQL.
+- With question validation, all 30 out-of-scope questions were refused without running any SQL.
 
 ### v3 · Ablation study and on-demand schema
 
