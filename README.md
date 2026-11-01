@@ -18,7 +18,6 @@ AI:   1. Iron Maiden (21 albums)  2. Led Zeppelin (14 albums)  3. Deep Purple (1
 - **Checked SQL**: every query is reviewed against the schema by a separate step before it runs, including common "silent" mistakes such as counting duplicated rows after a JOIN; only checked SQL is ever executed.
 - **Result verification**: after a query runs, a separate step checks that the result is a plausible answer (for example not an empty result where data should exist, or a count larger than the table). If not, the model re-checks and fixes the query before answering.
 - **Self-correction**: when a query fails, the error goes back to the model, which fixes the SQL and retries.
-- **Row limits that follow the question**: "top 3" returns 3 rows, "list every…" returns all rows, and other questions default to 5.
 - **Read-only by design**: the database is opened read-only and the MCP server accepts only a single `SELECT`/`WITH` statement.
 - **Reusable MCP server**: the database tools run as a standalone MCP server that any MCP client supporting SSE can use.
 - **Two interfaces**: a Gradio web chat and a command-line chat.
