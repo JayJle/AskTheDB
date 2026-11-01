@@ -212,7 +212,8 @@ python eval/run_eval.py H12 X06      # selected questions
 
 **Result**
 
-- Accuracy: 93.5% (187/200) on the 200-question evaluation built in v2.
+- Accuracy without question validation: 91.4% (182.7/200, 3-run average, range 180–185), measured on the 200-question evaluation in the v3 ablation study.
+- Out-of-scope questions: 21.3 of 30 refused, and SQL was run on 3.7 of them per run; ambiguous questions: 6.3 of 10 handled.
 
 ### v2 · Question validation, result verification and evaluation
 
@@ -226,7 +227,7 @@ python eval/run_eval.py H12 X06      # selected questions
 
 **Result**
 
-- Accuracy on the 200 questions rose from 93.5% to 97.5% (195/200, single run); hard questions 40/40.
+- Accuracy on the 200 questions rose from 91.4% to 97.5% (195/200, single run); hard questions 40/40.
 - Result verification triggered on 17 questions and 16 of them ended correct, including the apostrophe cases that had failed in every earlier run.
 - With question validation, all 30 out-of-scope questions were refused without running any SQL.
 
