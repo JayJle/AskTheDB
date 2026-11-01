@@ -176,22 +176,23 @@ The server exposes three tools to any MCP client that supports the SSE transport
 
 The `eval/` folder holds 200 hand-written questions with gold SQL, half English and half Chinese, covering 55 SQL and scenario dimensions (joins, subqueries, window functions, set operations, dates, typos, ambiguous wording, write requests, prompt injection and more). Every answerable question was checked to have a unique correct answer.
 
-| Category | Questions | Correct |
+Results for the current version, as 3-run averages (out-of-scope and ambiguous replies graded by an LLM judge, as in the v3 ablation study):
+
+| Category | Questions | Correct (3-run average) |
 |---|---|---|
-| Easy (single table) | 40 | 40 |
-| Medium (joins, grouping) | 50 | 48 |
-| Hard (multi-table joins, subqueries, window functions, set operations) | 40 | 40 |
-| Edge cases (typos, zero results, units, relative dates, …) | 30 | 27 |
-| Ambiguous (must clarify or state an interpretation) | 10 | 10 |
-| Out of scope (must refuse and run no SQL) | 30 | 30 |
-| **Total** | **200** | **195 (97.5%)** |
+| Easy (single table) | 40 | 40.0 |
+| Medium (joins, grouping) | 50 | 48.3 |
+| Hard (multi-table joins, subqueries, window functions, set operations) | 40 | 38.7 |
+| Edge cases (typos, zero results, units, relative dates, …) | 30 | 28.3 |
+| Ambiguous (must clarify or state an interpretation) | 10 | 10.0 |
+| Out of scope (must refuse and run no SQL) | 30 | 29.7 |
+| **Total** | **200** | **195.0 (97.5%, range 193–196)** |
 
-- The average time per question was about 9 s.
-- None of the 30 out-of-scope questions (missing data, write requests, prompt injection, password requests) ran any SQL.
-- Result verification sent feedback on 17 questions; 16 of them ended with a correct answer, including results that were empty only because a name was written with a different apostrophe.
-- The 5 misses: an artist name with a typo where too few tables were selected, a count after a JOIN that was not de-duplicated, a question read at the wrong level (artist instead of album), "the latest year" read as the wrong year, and a date comparison that dropped the boundary day.
+- The average time per question was 8.6 s.
+- None of the 30 out-of-scope questions (missing data, write requests, prompt injection, password requests) ran any SQL, in any of the 3 runs.
+- Questions that failed in at least 2 of the 3 runs: "the latest year" read as the last 12 months instead of the latest calendar year, a per-country summary that left out some of the requested numbers, employees listed by ID instead of by name, a question read at the wrong level (artist instead of album), and a date comparison that dropped the boundary day.
 
-These are single-run results on a well-known sample database, so expect lower accuracy on your own data. To run the evaluation yourself (with the MCP server running):
+These are 3-run averages on a well-known sample database, so expect lower accuracy on your own data. To run the evaluation yourself (with the MCP server running):
 
 ```bash
 python eval/run_eval.py              # all 200 questions
@@ -227,9 +228,8 @@ python eval/run_eval.py H12 X06      # selected questions
 
 **Result**
 
-- Accuracy on the 200 questions rose from 91.4% to 97.5% (195/200, single run); hard questions 40/40.
-- Result verification triggered on 17 questions and 16 of them ended correct, including the apostrophe cases that had failed in every earlier run.
-- With question validation, all 30 out-of-scope questions were refused without running any SQL.
+- Accuracy on the 200 questions rose from 91.4% to 96.0% (192.0/200, 3-run average, range 189–196); hard questions 37.7/40.
+- With question validation, all 30 out-of-scope questions were refused without running any SQL, in all 3 runs.
 
 ### v3 · Ablation study and on-demand schema
 
@@ -242,6 +242,6 @@ python eval/run_eval.py H12 X06      # selected questions
 
 **Result**
 
-- Re-measured with 3 runs and the same scoring: correct answers rose from 192.0 to 195.0 out of 200 on average; error stops fell from 8 to 0 and recursion-limit failures from 2 to 0 across the 3 runs; the spread between runs narrowed from 189–196 to 193–196. (v2's 97.5% was a single run near the top of that range.)
+- Re-measured with 3 runs and the same scoring: correct answers rose from 192.0 to 195.0 out of 200 on average; error stops fell from 8 to 0 and recursion-limit failures from 2 to 0 across the 3 runs; the spread between runs narrowed from 189–196 to 193–196.
 - What each check adds (3-run averages): removing question validation costs 12.3 questions (p = 0.031, all on out-of-scope and ambiguous questions); removing result verification costs 2 (not significant); the SQL check shows no measurable gain while using about 23% of the input tokens.
 - The full workflow answers about 26 more questions correctly than a single-prompt baseline (169.3/200, p < 0.001), at 2.9× the LLM calls and 1.9× the input tokens.
