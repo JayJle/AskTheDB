@@ -6,36 +6,38 @@ from sql_graph.log_utils import log
 
 TITLE = 'AskTheDB workflow'
 
-# Node display info: node name -> (title, kind, group, role tag)
-# Kinds (by role): terminal=start/end, gen_code=generates a tool call with fixed code,
-# gen_llm=generates a tool call with the LLM, execute=runs a tool call, check=LLM judges something
+# Node display info: node name -> (what it does, kind, group, node type)
+# Each box shows three things: what the node does, its type (LLM, code or tool) and its name in the code.
+# Kinds (box colors): terminal=start/end, gen_code=code node, gen_llm=LLM node that decides or writes,
+# execute=tool node, check=LLM node that checks
 NODE_META = {
     '__start__': ('User question', 'terminal', None, None),
-    'call_list_all_tables': ('Request the table list', 'gen_code', 'tables', 'by code (no LLM)'),
-    'list_all_tables_tool': ('① Get all table names', 'execute', 'tables', 'by MCP tool'),
-    'call_get_schema': ('② Pick the relevant tables', 'gen_llm', 'schema', 'by LLM'),
-    'get_schema_tool': ('③ Fetch their DDL', 'execute', 'schema', 'by local tool'),
-    'validate_question': ('④ Can the question be answered?', 'check', 'question', 'by LLM'),
-    'generate_query': ('⑤ Write SQL or the answer', 'gen_llm', 'sql', 'by LLM'),
-    'check_query': ('⑥ Check and fix the SQL', 'check', 'sql', 'by LLM'),
-    'run_query': ('⑦ Run the SQL', 'execute', 'sql', 'by MCP tool · read-only'),
-    'verify_result': ('⑧ Is the result plausible?', 'check', 'sql', 'by LLM'),
+    'call_list_all_tables': ('Prepare the call that lists all tables', 'gen_code', 'tables', 'Code node'),
+    'list_all_tables_tool': ('List all table names', 'execute', 'tables', 'Tool node · MCP server'),
+    'call_get_schema': ('Choose the tables the question needs', 'gen_llm', 'schema', 'LLM node'),
+    'get_schema_tool': ('Fetch the schema of the chosen tables', 'execute', 'schema', 'Tool node · local'),
+    'validate_question': ('Decide: answer, ask to clarify, or refuse', 'check', 'question', 'LLM node'),
+    'generate_query': ('Write the SQL or the final answer, fetching any missing table schema first',
+                       'gen_llm', 'sql', 'LLM node + tool node'),
+    'check_query': ('Fix mistakes in the SQL before it runs', 'check', 'sql', 'LLM node'),
+    'run_query': ('Run the SQL on the read-only database', 'execute', 'sql', 'Tool node · MCP server'),
+    'verify_result': ('Check the result makes sense, or ask to fix the SQL', 'check', 'sql', 'LLM node'),
 }
 
 # Nodes drawn as part of another node instead of as a box of their own, to keep the diagram
-# simple: node -> (host node, note shown in the host). Their edges are not drawn.
-# get_more_schema only fetches the DDL that ⑤ asks for before it writes the SQL
+# simple: node -> host node. The host lists both names, and their edges are not drawn.
+# get_more_schema only fetches the schema that generate_query asks for before it writes the SQL
 MERGED_NODES = {
-    'get_more_schema': ('generate_query', 'fetches the DDL of missing tables first if needed'),
+    'get_more_schema': 'generate_query',
 }
 
 # The graph has one end node; the diagram splits it into one ending per outcome, placed next to
 # the step that leads to it, so no exit line has to cross the diagram: ending -> (title, style, group)
 ENDINGS = {
-    'end_answer': ('Answer', 'terminal', 'sql'),
-    'end_clarify': ('Ask to clarify or explain why not', 'ending_clarify', None),
-    'end_error_schema': ('Stop with an error · nothing run', 'ending_error', 'schema'),
-    'end_error_sql': ('Stop with an error · nothing run', 'ending_error', 'sql'),
+    'end_answer': ('Final answer', 'terminal', 'sql'),
+    'end_clarify': ('Clarifying question or refusal', 'ending_clarify', None),
+    'end_error_schema': ('Error message · nothing run', 'ending_error', 'schema'),
+    'end_error_sql': ('Error message · nothing run', 'ending_error', 'sql'),
 }
 # Which ending each exit leads to (any other exit is a failed generation in the SQL loop)
 ENDING_FOR_SOURCE = {
@@ -47,20 +49,20 @@ ENDING_FOR_SOURCE = {
 DEFAULT_ENDING = 'end_error_sql'
 ERROR_ENDINGS = {'end_error_schema', 'end_error_sql'}
 
-# Routing functions for conditional edges: source -> (function name, question, {target: branch label})
+# Routing functions for conditional edges: source -> (function name, what it decides, {target: branch label})
 ROUTES = {
-    'generate_query': ('should_continue', 'Did ⑤ write a SQL query?', {
-        'check_query': 'Yes · SQL',
-        '__end__': 'No · ⑩ it wrote the answer',
+    'generate_query': ('should_continue', 'SQL or final answer?', {
+        'check_query': 'SQL',
+        '__end__': 'final answer',
     }),
 }
 
 # Labels on edges: (source, target) -> label ('__end__' stands for the ending of that source)
 EDGE_LABELS = {
     ('check_query', 'run_query'): 'checked SQL',
-    ('verify_result', 'generate_query'): '⑨ result, error or feedback',
-    ('validate_question', 'generate_query'): 'yes',
-    ('validate_question', '__end__'): 'unclear or out of scope',
+    ('verify_result', 'generate_query'): 'result, error or feedback',
+    ('validate_question', 'generate_query'): 'answer',
+    ('validate_question', '__end__'): 'clarify or refuse',
     ('call_get_schema', '__end__'): 'LLM call failed',
     ('check_query', '__end__'): 'LLM call failed',
 }
@@ -99,12 +101,12 @@ EDGE_ORDER = [
 ]
 
 LEGEND = [
-    ('#6366F1', 'LLM decides what to run'),
-    ('#F59E0B', 'Code prepares the call (no LLM)'),
-    ('#10B981', 'A tool runs the call'),
-    ('#0EA5E9', 'LLM checks the question, SQL or result'),
+    ('#6366F1', 'LLM node that decides or writes'),
+    ('#0EA5E9', 'LLM node that checks'),
+    ('#F59E0B', 'Code node (no LLM)'),
+    ('#10B981', 'Tool node'),
     ('#64748B', 'Routing rule in code'),
-    ('#DC2626', 'Stops with an error; nothing is run'),
+    ('#DC2626', 'Error exit: nothing is run'),
 ]
 
 STYLES = '''
@@ -125,16 +127,17 @@ STYLES = '''
 '''
 
 
+def _box_label(does: str, node_type: str, name: str) -> str:
+    """The three lines of a box: what it does, its type, and its name in the code."""
+    return f'<b>{does}</b><br/><small>{node_type}</small><br/><small><i>{name}</i></small>'
+
+
 def _node_line(node_id: str) -> str:
-    title, kind, _, role = NODE_META.get(node_id, (node_id, 'default', None, None))
+    does, kind, _, node_type = NODE_META.get(node_id, (node_id, 'default', None, ''))
     if kind == 'terminal':
-        return f'    {node_id}(["<b>{title}</b>"]):::terminal'
-    merged = [(name, note) for name, (host, note) in MERGED_NODES.items() if host == node_id]
-    label = f'<small><b>{role}</b></small><br/>' if role else ''
-    label += f'<b>{title}</b><br/>'
-    label += ''.join(f'<small>{note}</small><br/>' for _, note in merged)
-    label += f'<small><i>node: {" + ".join([node_id] + [name for name, _ in merged])}</i></small>'
-    return f'    {node_id}("{label}"):::{kind}'
+        return f'    {node_id}(["<b>{does}</b>"]):::terminal'
+    names = [node_id] + [name for name, host in MERGED_NODES.items() if host == node_id]
+    return f'    {node_id}("{_box_label(does, node_type, "node: " + " + ".join(names))}"):::{kind}'
 
 
 def _ending_line(ending_id: str) -> str:
@@ -177,7 +180,8 @@ def to_mermaid(graph) -> str:
             items[node_id] = (NODE_META.get(node_id, (None, None, None, None))[2], _node_line(node_id))
     for source, (func, question, _) in ROUTES.items():
         if source in g.nodes:
-            line = f'    {source}_route{{{{"<b>{question}</b><br/><small><i>{func}</i></small>"}}}}:::decision'
+            label = _box_label(question, 'Routing rule in code', f'function: {func}')
+            line = f'    {source}_route{{{{"{label}"}}}}:::decision'
             items[f'{source}_route'] = (NODE_META[source][2], line)
     for ending_id in {ending_for(e.source) for e in g.edges if e.target == '__end__'}:
         items[ending_id] = (ENDINGS[ending_id][2], _ending_line(ending_id))
